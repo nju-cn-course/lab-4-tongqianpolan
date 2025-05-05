@@ -1,0 +1,163 @@
+name: Autograding Tests
+'on':
+- workflow_dispatch
+- repository_dispatch
+permissions:
+  checks: write
+  actions: read
+  contents: read
+jobs:
+  run-autograding-tests:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-classroom[bot]'
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    - name: Setup
+      id: setup
+      uses: classroom-resources/autograding-command-grader@v1
+      with:
+        test-name: Setup
+        setup-command: ''
+        command: sudo add-apt-repository ppa:deadsnakes/ppa && sudo apt install libpcap0.8-dev
+          && sudo apt install python3.7 && sudo update-alternatives --install /usr/bin/python3
+          python3 /usr/bin/python3.10 1 && sudo update-alternatives --install /usr/bin/python3
+          python3 /usr/bin/python3.7 2 && sudo update-alternatives --auto python3
+          && sudo apt install python3.7-distutils && python3 -m pip install git+https://gitee.com/pavinberg/switchyard.git
+        timeout: 10
+    - name: Test Advanced
+      id: test-advanced
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: Test Advanced
+        setup-command: ''
+        command: swyard --nopdb -t testcases/testscenario2_advanced.srpy myrouter.py
+          > testcases/result
+        input: ''
+        expected-output: ''
+        comparison-method: contains
+        timeout: 5
+    - name: Awk Process
+      id: awk-process
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: Awk Process
+        setup-command: ''
+        command: 'awk ''/Results for test scenario IP forwarding and ARP requester
+          tests:/ {printf ($11 >= 50 ? "ckpt1 1\n" : "ckpt1 0\n"); printf($11 >= 100
+          ? "ckpt2 1\n" : "ckpt2 0\n"); printf($11 >= 150 ? "ckpt3 1\n" : "ckpt3 0\n");
+          printf($11 >= 650 ? "ckpt4 1\n" : "ckpt4 0\n");printf($11 >= 1205 ? "ckpt5
+          1\n" : "ckpt5 0\n"); printf($11 >= 1210 ? "ckpt6 1\n" : "ckpt6 0\n")}''
+          testcases/result > testcases/result_ckpt'
+        input: ''
+        expected-output: ''
+        comparison-method: contains
+        timeout: 5
+    - name: Ckpt1_50
+      id: ckpt1_50
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: Ckpt1_50
+        setup-command: ''
+        command: cat testcases/result_ckpt
+        input: ''
+        expected-output: ckpt1 1
+        comparison-method: contains
+        timeout: 5
+        max-score: 15
+    - name: ckpt2_100
+      id: ckpt2_100
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: ckpt2_100
+        setup-command: ''
+        command: cat testcases/result_ckpt
+        input: ''
+        expected-output: ckpt2 1
+        comparison-method: contains
+        timeout: 5
+        max-score: 15
+    - name: ckpt3_150
+      id: ckpt3_150
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: ckpt3_150
+        setup-command: ''
+        command: cat testcases/result_ckpt
+        input: ''
+        expected-output: ckpt3 1
+        comparison-method: contains
+        timeout: 5
+        max-score: 20
+    - name: ckpt4_650
+      id: ckpt4_650
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: ckpt4_650
+        setup-command: ''
+        command: cat testcases/result_ckpt
+        input: ''
+        expected-output: ckpt4 1
+        comparison-method: contains
+        timeout: 5
+        max-score: 20
+    - name: ckpt5_1205
+      id: ckpt5_1205
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: ckpt5_1205
+        setup-command: ''
+        command: cat testcases/result_ckpt
+        input: ''
+        expected-output: ckpt5 1
+        comparison-method: contains
+        timeout: 5
+        max-score: 20
+    - name: ckpt6_1210
+      id: ckpt6_1210
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: ckpt6_1210
+        setup-command: ''
+        command: cat testcases/result_ckpt
+        input: ''
+        expected-output: ckpt6 1
+        comparison-method: contains
+        timeout: 5
+        max-score: 20
+    - name: Clean
+      id: clean
+      uses: classroom-resources/autograding-command-grader@v1
+      with:
+        test-name: Clean
+        setup-command: ''
+        command: rm testcases/result testcases/result_ckpt
+        timeout: 5
+    - name: Test Basic
+      id: test-basic
+      uses: classroom-resources/autograding-io-grader@v1
+      with:
+        test-name: Test Basic
+        setup-command: ''
+        command: swyard --nopdb -t testcases/testscenario2.srpy myrouter.py
+        input: ''
+        expected-output: All tests passed!
+        comparison-method: contains
+        timeout: 5
+        max-score: 10
+    - name: Autograding Reporter
+      uses: classroom-resources/autograding-grading-reporter@v1
+      env:
+        SETUP_RESULTS: "${{steps.setup.outputs.result}}"
+        TEST-ADVANCED_RESULTS: "${{steps.test-advanced.outputs.result}}"
+        AWK-PROCESS_RESULTS: "${{steps.awk-process.outputs.result}}"
+        CKPT1_50_RESULTS: "${{steps.ckpt1_50.outputs.result}}"
+        CKPT2_100_RESULTS: "${{steps.ckpt2_100.outputs.result}}"
+        CKPT3_150_RESULTS: "${{steps.ckpt3_150.outputs.result}}"
+        CKPT4_650_RESULTS: "${{steps.ckpt4_650.outputs.result}}"
+        CKPT5_1205_RESULTS: "${{steps.ckpt5_1205.outputs.result}}"
+        CKPT6_1210_RESULTS: "${{steps.ckpt6_1210.outputs.result}}"
+        CLEAN_RESULTS: "${{steps.clean.outputs.result}}"
+        TEST-BASIC_RESULTS: "${{steps.test-basic.outputs.result}}"
+      with:
+        runners: setup,test-advanced,awk-process,ckpt1_50,ckpt2_100,ckpt3_150,ckpt4_650,ckpt5_1205,ckpt6_1210,clean,test-basic
