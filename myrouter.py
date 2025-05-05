@@ -1,327 +1,158 @@
-#!/usr/bin/env python3
-
-'''
-Basic IPv4 router (static routing) in Python.
-'''
-
 import time
+import threading
+from queue import Queue, PriorityQueue
 import switchyard
 from switchyard.lib.userlib import *
 
-class PendingPacket:
-    def __init__(self, pkt, next_hop_ip, out_iface):
-        self.pkt = pkt
-        self.next_hop_ip = next_hop_ip
-        self.out_iface = out_iface
-        self.last_sent_time = 0
-        self.retry_count = 0
+class Wait:
+    def __init__(self, pkt, intf, dstip):
+        self.packet = pkt
+        self.lasttime = 0   # 上一次发送ARP请求的时间
+        self.count = 0      # 累计发送ARP请求的次数
+        self.interface = intf
+        self.dstipaddr = dstip
 
-class ArpCacheEntry:
-    def __init__(self, mac_addr):
-        self.mac_addr = mac_addr
-        self.timestamp = time.time()
+    def forwarding(self, cache, net, repeat):
+        if self.dstipaddr in cache.keys():
+            # ARP缓存表中有匹配则替换相应地址后发送
+            dstmac = cache[self.dstipaddr]
+            self.packet[0].dst = str(dstmac)
+            net.send_packet(self.interface.name, self.packet)
+            return 0
+        # 需要距离上次发送超过1秒且相同的目的地址还没发送过请求
+        elif time.time() - self.lasttime >= 1 and self.dstipaddr not in repeat:
+            if self.count < 5:          # 且发送次数不超过5次
+                repeat.append(self.dstipaddr)
+                # 构建ARP请求包，发送并更新状态
+                ether = Ethernet()
+                # ether.src = self.packet[0].src
+                ether.src = self.interface.ethaddr
+                ether.dst = 'ff:ff:ff:ff:ff:ff'
+                ether.ethertype = EtherType.ARP
+                arp = Arp(operation=ArpOperation.Request,
+                          senderhwaddr=self.interface.ethaddr,
+                          senderprotoaddr=self.interface.ipaddr,
+                          targethwaddr='ff:ff:ff:ff:ff:ff',
+                          targetprotoaddr=self.dstipaddr)
+                arppacket = ether + arp
+                self.lasttime = time.time()
+                net.send_packet(self.interface.name, arppacket)
+                self.count += 1
+                return 1
+            else:
+                return - 1
+        else:
+            return 1
 
-class ArpTable:
-    def __init__(self):
-        self.cache = {}
-
-    def add_or_update(self, ip_addr, mac_addr):
-        if mac_addr == 'ff:ff:ff:ff:ff:ff':
-            print(f"Warning: Receive broadcast MAC for {ip_addr}, ignoring.")
-            return
-        self.cache[ip_addr] = ArpCacheEntry(mac_addr)
-        self.print_table()
-
-    def lookup(self, ip_addr):
-        entry = self.cache.get(ip_addr)
-        if entry:
-            return entry.mac_addr
-        return None
-
-    def print_table(self):
-        print("Current Arp Table:")
-        for ip, entry in self.cache.items():
-            print(f"IP: {ip}, MAC: {entry.mac_addr}, Age: {int(time.time() - entry.timestamp)}s")
-
-def ipv4_to_int(ip_str):
-    return int(IPv4Address(ip_str))
-
-def int_to_ipv4(ip_int):
-    return str(IPv4Address(ip_int))
-
-def get_work_address(ip_str, mask_str):
-    ip_int = ipv4_to_int(ip_str)
-    mask_int = ipv4_to_int(mask_str)
-    network_int = ip_int & mask_int
-    prefix_len = bin(mask_int).count('1')
-    #prefix_len = IPv4Network(f'{ip_str}/{mask_str}').prefixlen
-    return network_int, prefix_len
-
-def build_forwarding_table(net_interfaces, forwarding_table_filename):
-    forwarding_table = []
-    for intf in net_interfaces:
-        if intf.ipaddr is not None and intf.netmask is not None:
-            netmask_str = str(intf.netmask)
-            ip_str= str(intf.ipaddr)
-            network_int, _ = get_work_address(ip_str, netmask_str)
-            entry = {
-                'network': int_to_ipv4(network_int),
-                'netmask': netmask_str,
-                'next_hop': '0.0.0.0',
-                'interface': intf.name
-            }
-            forwarding_table.append(entry)
-
-    with open(forwarding_table_filename, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            parts = line.split()
-            if len(parts) != 4:
-                continue
-            network_int, _ = get_work_address(parts[0], parts[1])
-            entry = {
-                'network': int_to_ipv4(network_int),
-                'netmask': parts[1],
-                'next_hop': parts[2],
-                'interface': parts[3],
-            }
-            forwarding_table.append(entry)
-    
-    return forwarding_table
 
 
 class Router(object):
-    def __init__(self, net: switchyard.llnetbase.LLNetBase):
+    def __init__(self, net):
         self.net = net
         # other initialization stuff here
-        self.interfaces = list(self.net.interfaces())
-        self.arp_table = {}
-        self.pending_packets = []
-        self.forwarding_table = build_forwarding_table(self.interfaces, '/home/njucs/lab/lab-4/lab-4-tongqianpolan/forwarding_table.txt')
-        print("router:", self.forwarding_table)
-        print("interfaces list:", [(i.name, i.ipaddr, i.netmask) for i in self.interfaces])
-       
 
-    def handle_packet(self, recv: switchyard.llnetbase.ReceivedPacket):
-        timestamp, ifaceName, packet = recv
-        # TODO: your logic here
-        eth = packet.get_header(Ethernet)
-        if eth is None:
-            return
 
-        iface = self.get_interface_by_name(ifaceName)
-
-        if eth.dst not in (EthAddr('ff:ff:ff:ff:ff:ff'), iface.ethaddr):
-            return
-
-        if eth.ethertype == EtherType.ARP:
-            self.handle_arp(packet, ifaceName)
-        
-        elif eth.ethertype == EtherType.IPv4:
-           self.handle_ip4(packet, ifaceName)
-
-    def get_interface_by_name(self, name):
-        #print(f"all interfaces: {self.interfaces}")
-        #print(name)
-        for intf in self.interfaces:
-            print(f"interface name: {intf.name}, name: {name}")
-            if intf.name == name:
-                return intf
-        return None
-
-    def forward_packet(self, pkt, next_hop_ip, out_iface_name):
-        out_iface = self.get_interface_by_name(out_iface_name)
-        print(out_iface, out_iface_name)
-        if not out_iface:
-            log_info(f"interface {out_iface_name} not found")
-            return
-
-        if next_hop_ip in self.arp_table:
-            try:
-                eth = Ethernet()
-                eth.src = out_iface.ethaddr
-                eth.dst = EthAddr(self.arp_table[next_hop_ip])
-                eth.ethertype = EtherType.IPv4
-                pkt[0] = eth
-                self.net.send_packet(out_iface_name, pkt)
-                log_info(f"forwarded packet to {next_hop_ip} via {out_iface_name}")
-            except Exception as e:
-                log_info(f"failed to forward packet: {e}")
-        else:
-            self.queue_packet(pkt, next_hop_ip, out_iface)
-
-    def queue_packet(self, pkt, next_hop_ip, out_iface):
-        pending = PendingPacket(pkt, next_hop_ip, out_iface)
-        pending.last_sent_time = time.time() - 1
-        #self.send_arp_request(pending)
-        self.pending_packets.append(pending)
-
-    def handle_ip4(self, packet, ifaceName):
-        ipv4 = packet.get_header(IPv4)
-        if ipv4.dst in [intf.ipaddr for intf in self.interfaces]:
-            return
-        ipv4.ttl -= 1
-        if ipv4.ttl <= 0:
-            return
-
-        next_hop_ip = self.lookup_next_hop(str(ipv4.dst))
-        if next_hop_ip is None:
-            return
-
-        out_iface_name = self.find_outgoing_interface(next_hop_ip)
-        if out_iface_name is None:
-            return
-
-        print("forward normal packet")
-        self.forward_packet(packet, next_hop_ip, out_iface_name)
-
-    def handle_arp(self, packet, ifaceName):
-        arp = packet.get_header(Arp)
-        if arp.operation == ArpOperation.Reply:
-            self.handle_arp_reply(packet)
-        elif arp.operation == ArpOperation.Request:
-            self.handle_arp_request(packet, ifaceName)
-
-    def handle_arp_request(self, packet, ifaceName):
-        arp = packet.get_header(Arp)
-        log_info("interfaces:")
-        for intf in self.interfaces:
-            log_info(f" {intf.name}: ip={intf.ipaddr}, mask={intf.netmask}")
-            if arp.targetprotoaddr == intf.ipaddr:
-                reply = create_ip_arp_reply(
-                    srchw = intf.ethaddr,
-                    dsthw = arp.senderhwaddr,
-                    srcip = intf.ipaddr,
-                    targetip = arp.senderprotoaddr,
-                )
-                self.net.send_packet(ifaceName, reply)
-                log_info(f"replied to arp request for {intf.ipaddr}")
-                break
-
-    def handle_arp_reply(self, pkt):
-        arp = pkt.get_header(Arp)
-        print("arp_table:", self.arp_table)
-        self.arp_table[str(arp.senderprotoaddr)] = str(arp.senderhwaddr)
-        #print("pending_packets:", self.pending_packets)
-        
-        forwarded_packets = [pending for pending in self.pending_packets if IPv4Address(pending.next_hop_ip) == arp.senderprotoaddr]
-        for pending in forwarded_packets:
-            print(f"pending next_hop_ip: {pending.next_hop_ip}, pending out_iface: {pending.out_iface.name}")
-            self.forward_packet(pending.pkt, pending.next_hop_ip, pending.out_iface.name)
-               
-        self.pending_packets = [pending for pending in self.pending_packets if IPv4Address(pending.next_hop_ip) != arp.senderprotoaddr]
-        # to_forward = []
-        # for pending in self.pending_packets:
-        #     if pending.next_hop_ip == str(arp.senderhwaddr):
-        #         self.forward_packet(pending.pkt, pending.next_hop_ip, pending.out_iface.name)
-        #         to_forward.append(pending)
-
-        # for pending in to_forward:
-        #     self.pending_packets.remove(pending)
-
-    def lookup_next_hop(self, dst_ip):
-        dst_ip_int = ipv4_to_int(dst_ip)
-        best_match = None
-        longest_prefix = -1
-        for entry in self.forwarding_table:
-            network_int, prefix_len = get_work_address(entry['network'], entry['netmask'])
-            target_network_int = dst_ip_int & ipv4_to_int(entry['netmask'])
-            if network_int == target_network_int:
-                if prefix_len > longest_prefix:
-                    longest_prefix = prefix_len
-                    best_match = entry
-        if best_match: 
-            if best_match['next_hop'] == '0.0.0.0':
-                return dst_ip
-            else:
-                return best_match['next_hop']
-        return None
-
-    def find_outgoing_interface(self, next_hop_ip):
-        longest_prefix = -1
-        selected_intf = None
-        log_info("interfaces:")
-        for intf in self.interfaces:
-            if intf.ipaddr is None or intf.netmask is None:
-                continue
-            log_info(f" {intf.name}: ip={intf.ipaddr}, mask={intf.netmask}")
-            netmask_str = str(intf.netmask)
-            ip_str = str(intf.ipaddr)
-            intf_network, intf_prefix = get_work_address(ip_str, netmask_str)
-            target_network, _ = get_work_address(next_hop_ip, netmask_str)
-            log_info(f"matching {next_hop_ip}: net_int={hex(intf_network)}, target={hex(target_network)}")
-            if intf_network == target_network:
-                if intf_prefix > longest_prefix:
-                    longest_prefix = intf_prefix
-                    selected_intf = intf
-        if selected_intf:
-            return selected_intf.name
-        return None
-
-    def send_arp_request(self, pending):
-        # import pdb; pdb.set_trace()
-        out_iface = pending.out_iface
-        if not out_iface:
-            log_info(f"interface {pending.out_iface} not found")
-            return
-       
-       
-        print(f"arp req: src_mac={out_iface.ethaddr}, src_ip={out_iface.ipaddr}, target_ip={pending.next_hop_ip}")
-        # log_info(f"arp req for {pending.next_hop_ip} via {pending.out_iface}")
-        try:
-            arp_req = create_ip_arp_request(
-                srchw = out_iface.ethaddr,
-                srcip = out_iface.ipaddr,
-                targetip = IPv4Address(pending.next_hop_ip)
-            )
-            print(f"send arp via interface: {pending.out_iface.name}")
-            
-            self.net.send_packet(out_iface.name, arp_req)
-            pending.last_sent_time = time.time()
-            pending.retry_count += 1
-
-            return True
-
-        except Exception as e:
-            log_info(f"failed to send arp request: {e}")
-            return False
-        
-
-    def checking_pending_packets(self):
-        now = time.time()
-        still_pending = []
-        for pending in self.pending_packets:
-            if pending.retry_count >= 5:
-                log_info(f"ARP request for {pending.next_hop_ip} failed after 5 retries.")
-                continue
-            if now - pending.last_sent_time >= 1.0:
-                if self.send_arp_request(pending):
-                    still_pending.append(pending)
-            else:
-                 still_pending.append(pending)
-        self.pending_packets = still_pending
-
-    def start(self):
-        '''A running daemon of the router.
-        Receive packets until the end of time.
+    def router_main(self):
         '''
+        Main method for router; we stay in a loop in this method, receiving
+        packets until the end of time.
+        '''
+        
+        cache = {}
+        forwarding_table = {}
+        waiting_queue = []
+        
+        my_interfaces = self.net.interfaces()
+        for intf in my_interfaces:
+            # print(intf)
+            ipaddr = IPv4Address(int(intf.ipaddr) & int(intf.netmask))  # 通过掩码取出端口的IP地址所在的子网
+            key = IPv4Network(str(ipaddr) + '/' + str(intf.netmask))    # 子网地址与掩码组合形成键
+            forwarding_table[key] = [None, intf.name]                     # 下一跳地址用空字符''代替
+
+        
+        with open("forwarding_table.txt") as file_object:
+            for line in file_object:
+                info = line.rsplit()        # 去掉行尾回车
+                if info:                    # 确保不是空行
+                    key = IPv4Network(info[0] + '/' + info[1])  # 子网地址与掩码组合
+                    forwarding_table[key] = info[2:]
+        
+        for item in forwarding_table.items():
+            print(item)
+        
         while True:
+            gotpkt = True
             try:
-                recv = self.net.recv_packet(timeout=1.0)
+                timestamp, dev, pkt = self.net.recv_packet(timeout=1.0)
             except NoPackets:
-                continue
+                log_debug("No packets available in recv_packet")
+                gotpkt = False
             except Shutdown:
+                log_debug("Got shutdown signal")
                 break
 
-            self.handle_packet(recv)
-            self.checking_pending_packets()
+            if gotpkt:
+                log_debug("Got a packet: {}".format(str(pkt)))
 
-        self.stop()
+                # 将非ARP和IPv4的包抛弃
+                arp = pkt.get_header(Arp)
+                ipv4 = pkt.get_header(IPv4)
+                
+                if arp:
+                    # 更新ARP缓存表
+                    cache[arp.senderprotoaddr] = arp.senderhwaddr
+                    for key, value in cache.items():
+                        print(key, "\t", value)
+                    print()
+                    if arp.operation == ArpOperation.Request:
+                        for intf in my_interfaces:
+                            if arp.targetprotoaddr == intf.ipaddr:
+                                packet = create_ip_arp_reply(intf.ethaddr, arp.senderhwaddr, arp.targetprotoaddr, arp.senderprotoaddr)
+                                self.net.send_packet(intf.name, packet)
+                                log_debug("send packet {} to {}".format(packet, intf.name))
+                elif ipv4:
+                    # 准备转发数据包的预处理
+                    pkt[1].ttl = pkt[1].ttl - 1
+                    prefix = 0
+                    net = IPv4Network('0.0.0.0/0')
+                    # 抛弃目标地址为路由器的包
+                    run = True
+                    for intf in my_interfaces:
+                        if pkt[1].dst == intf.ipaddr:
+                            run = False
+                            break
+                    
+                    if run:
+                        # 最长前缀匹配
+                        for key in forwarding_table.keys():
+                            if pkt[1].dst in key:
+                                if key.prefixlen > prefix:
+                                    net = key
+                                    prefix = key.prefixlen
+                        if prefix != 0:
+                            next_hop = IPv4Address(forwarding_table[net][0]) if forwarding_table[net][0] else pkt[1].dst
+                            out_iface = forwarding_table[net][1]
 
-    def stop(self):
-        self.net.shutdown()
+                            # 检查ARP缓存
+                            if next_hop in cache:
+                                # 有缓存，直接转发
+                                pkt[0].src = self.net.interface_by_name(out_iface).ethaddr
+                                pkt[0].dst = cache[next_hop]
+                                self.net.send_packet(out_iface, pkt)
+                            else:
+                                # 无缓存，发送ARP请求并缓存包
+                                waiting_queue.append(Wait(pkt, self.net.interface_by_name(out_iface), next_hop))
+            # 对队列中所有包尝试转发并删除某些包（成功转发和ARP请求将超过5次）
+            repeat = []         # 存储之前已经发送过ARP请求的包的目的地址
+            to_delete = []      # 存储将要被删除的包
+            for item in waiting_queue:
+                flag = item.forwarding(cache, self.net, repeat)
+                if flag == 0:
+                    to_delete.append(item)
+                elif flag == -1:
+                    to_delete.extend([x for x in waiting_queue if x.dstipaddr == item.dstipaddr])
+            for i in to_delete:
+                waiting_queue.remove(i)
 
 
 def main(net):
@@ -329,5 +160,7 @@ def main(net):
     Main entry point for router.  Just create Router
     object and get it going.
     '''
-    router = Router(net)
-    router.start()
+    r = Router(net)
+    r.router_main()
+    net.shutdown()
+
